@@ -1,8 +1,5 @@
 package shoppingcart.api;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import akka.http.javadsl.model.HttpResponse;
 import akka.http.javadsl.model.StatusCodes;
 import akka.javasdk.annotations.Acl;
@@ -16,6 +13,8 @@ import akka.javasdk.client.ComponentClient;
 import akka.javasdk.http.AbstractHttpEndpoint;
 import akka.javasdk.http.HttpException;
 import akka.javasdk.http.HttpResponses;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import shoppingcart.application.ShoppingCartEntity;
 import shoppingcart.application.ShoppingCartView;
 import shoppingcart.application.UserEntity;
@@ -25,99 +24,119 @@ import shoppingcart.application.UserEntity;
 @HttpEndpoint("/carts")
 public class ShoppingCartEndpoint extends AbstractHttpEndpoint {
 
-    private final ComponentClient componentClient;
 
-    private static final Logger logger = LoggerFactory.getLogger(ShoppingCartEndpoint.class);
+  private final ComponentClient componentClient;
 
-    public record LineItemRequest(String productId, String name, int quantity, String description) {
+  private static final Logger logger = LoggerFactory.getLogger(ShoppingCartEndpoint.class);
+
+  public record LineItemRequest(
+    String productId,
+    String name,
+    int quantity,
+    String description
+  ) {}
+
+
+  public ShoppingCartEndpoint(ComponentClient componentClient) {
+    this.componentClient = componentClient;
+  }
+
+  @Get("/{cartId}")
+  public ShoppingCartView.Cart get(String cartId) {
+    logger.info("Get cart id={}", cartId);
+
+    var userId = requestContext().getJwtClaims().subject().get();
+
+    var cart = componentClient
+      .forView()
+      .method(ShoppingCartView::getCart) // <1>
+      .invoke(cartId);
+
+    if (cart.userId().trim().equals(userId)) {
+      return cart;
+    } else {
+      throw HttpException.error(StatusCodes.NOT_FOUND, "no such cart");
     }
+  }
 
-    public ShoppingCartEndpoint(ComponentClient componentClient) {
-        this.componentClient = componentClient;
-    }
 
-    @Get("/{cartId}")
-    public ShoppingCartView.Cart get(String cartId) {
-        logger.info("Get cart id={}", cartId);
+  @Get("/my")
+  public ShoppingCartView.Cart getByUser() {
+    var userId = requestContext().getJwtClaims().subject().get();
 
-        var userId = requestContext().getJwtClaims().subject().get();
+    logger.info("Get cart userId={}", userId);
 
-        var cart=  componentClient.forView()
-          .method(ShoppingCartView::getCart) // <1>
-          .invoke(cartId);
+    var result = componentClient
+      .forView()
+      .method(ShoppingCartView::getUserCart) // <1>
+      .invoke(userId);
 
-        if (cart.userId().trim().equals(userId)) {
-          return cart;
-        } else {
-          throw HttpException.error(StatusCodes.NOT_FOUND, "no such cart");
-        }
-    }
+    return result.orElseThrow(
+      () -> HttpException.error(StatusCodes.NOT_FOUND, "no such cart")
+    );
+  }
 
-    @Get("/my")
-    public ShoppingCartView.Cart getByUser() {
-        var userId = requestContext().getJwtClaims().subject().get();
 
-        logger.info("Get cart userId={}", userId);
+  @Put("/my/item")
+  public HttpResponse addItem(LineItemRequest item) {
+    logger.info("Adding item to cart item={}", item);
 
-        var result = componentClient.forView()
-                .method(ShoppingCartView::getUserCart) // <1>
-                .invoke(userId);
+    var userId = requestContext().getJwtClaims().subject().get();
 
-        return result.orElseThrow(() -> HttpException.error(StatusCodes.NOT_FOUND, "no such cart"));
-    }
+    var cartId = componentClient
+      .forEventSourcedEntity(userId)
+      .method(UserEntity::currentCartId)
+      .invoke();
 
-    @Put("/my/item")
-    public HttpResponse addItem(LineItemRequest item) {
-        logger.info("Adding item to cart item={}", item);
+    componentClient
+      .forEventSourcedEntity(cartId)
+      .method(ShoppingCartEntity::addItem)
+      .invoke(
+        new ShoppingCartEntity.AddLineItemCommand(
+          userId,
+          item.productId(),
+          item.name(),
+          item.quantity(),
+          item.description()
+        )
+      );
 
-        var userId = requestContext().getJwtClaims().subject().get();
+    return HttpResponses.ok();
+  }
 
-        var cartId = componentClient.forEventSourcedEntity(userId)
-                .method(UserEntity::currentCartId)
-                .invoke();
+  @Delete("/my/item/{productId}")
+  public HttpResponse removeItem(String productId) {
+    logger.info("Removing item from item={}", productId);
 
-        componentClient.forEventSourcedEntity(cartId)
-            .method(ShoppingCartEntity::addItem)
-            .invoke(new ShoppingCartEntity.AddLineItemCommand(
-                    userId,
-                    item.productId(),
-                    item.name(),
-                    item.quantity(),
-                    item.description()));
+    var userId = requestContext().getJwtClaims().subject().get();
 
-        return HttpResponses.ok();
-    }
+    var cartId = componentClient
+      .forEventSourcedEntity(userId)
+      .method(UserEntity::currentCartId)
+      .invoke();
+    componentClient
+      .forEventSourcedEntity(cartId)
+      .method(ShoppingCartEntity::removeItem)
+      .invoke(productId);
+    return HttpResponses.ok();
+  }
 
-    @Delete("/my/item/{productId}")
-    public HttpResponse removeItem(String productId) {
-        logger.info("Removing item from item={}", productId);
+  @Post("/my/checkout")
+  public HttpResponse checkout() {
+    logger.info("Checkout cart");
 
-        var userId = requestContext().getJwtClaims().subject().get();
+    var userId = requestContext().getJwtClaims().subject().get();
 
-        var cartId = componentClient.forEventSourcedEntity(userId)
-                .method(UserEntity::currentCartId)
-                .invoke();
-        componentClient.forEventSourcedEntity(cartId)
-                        .method(ShoppingCartEntity::removeItem)
-                        .invoke(productId);
-        return HttpResponses.ok();
-    }
+    var cartId = componentClient
+      .forEventSourcedEntity(userId)
+      .method(UserEntity::currentCartId)
+      .invoke();
 
-    @Post("/my/checkout")
-    public HttpResponse checkout() {
-        logger.info("Checkout cart");
+    componentClient
+      .forEventSourcedEntity(cartId)
+      .method(ShoppingCartEntity::checkout)
+      .invoke(userId);
 
-        var userId = requestContext().getJwtClaims().subject().get();
-
-        var cartId = componentClient.forEventSourcedEntity(userId)
-                .method(UserEntity::currentCartId)
-                .invoke();
-
-        componentClient.forEventSourcedEntity(cartId)
-                        .method(ShoppingCartEntity::checkout)
-                        .invoke(userId);
-
-        return HttpResponses.ok();
-    }
-
+    return HttpResponses.ok();
+  }
 }
